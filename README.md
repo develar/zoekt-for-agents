@@ -25,7 +25,7 @@ queries well under a second.
 | `bin/zk` | search: Zoekt query syntax, output `path:line:text`, local changes overlaid |
 | `cmd/zk-search` | small Go client over the Zoekt library with result caps (`-max_files`, `-max_lines`, `-max_wall`); the stock `zoekt` CLI has none and takes 13 s on a term like `fun main` |
 | `bin/zkf` | find files by path regex: `git ls-files` plus untracked files, through ripgrep |
-| `bin/zk-wt` | helper: working-tree changes with a time budget, so a slow `git status` never stalls a search |
+| `bin/zk-wt` | helper: working-tree changes with a cache and a time budget, so a slow `git status` never stalls a search |
 | `reindex.sh` | build or refresh the index from the reference clone's `origin/<branch>`; incremental/delta |
 | `hooks/git/reference-transaction` | local git hook for the reference clone: `origin/<branch>` moved, refresh in background |
 | `hooks/claude/no-repo-wide-grep.py` | Claude Code `PreToolUse` hook: refuses repo-wide `rg` / `git grep` / `fd` inside a clone of the indexed repo and tells the agent to use `zk` |
@@ -79,8 +79,12 @@ plain text is a substring, regex metacharacters make it a regex, terms are ANDed
    the content terms of the query. That set is small for a feature branch, so this stays fast.
 4. If the clone has never fetched the indexed commit, `zk` falls back to the clone's `origin/<branch>` and
    says so: the index may then show upstream content the clone does not have yet, but nothing local is lost.
-5. `git status` gets a time budget (`ZK_WT_BUDGET`, default 2 s). When it is exceeded, uncommitted edits are
-   not overlaid and `zk` prints a note; committed differences are always overlaid.
+5. `git status` is the one expensive step: fast with fsmonitor most of the time, with multi-second outliers
+   on a million-file tree. `zk-wt` caches its result in `<git dir>/zk-wt.cache`, serves a result younger
+   than `ZK_WT_FRESH` (5 s) without running git, and otherwise gives `git status` `ZK_WT_BUDGET` (2 s): on
+   overrun it keeps running in the background to refresh the cache while the previous result is used and
+   `zk` says how old it is. Committed differences are always current; a brand-new untracked file can lag
+   by one slow `git status`.
 
 ## Keeping the index fresh
 
