@@ -1,0 +1,101 @@
+#!/bin/bash
+# zk - search a shared Zoekt index of a monorepo, with this clone's local changes overlaid.
+#
+# Usage: zk [options] <zoekt query>
+#   -l            print matching file names only
+#   -n N          max output lines (default 200)
+#   --all         include paths matched by ZK_EXCLUDE (excluded unless the query mentions them)
+#   --no-overlay  skip the local-changes overlay (index only)
+#   -v            diagnostics on stderr
+#
+# Query syntax (Zoekt): plain text is a substring match, regex metacharacters make it a regex,
+# terms are ANDed, `or` between terms, parentheses group, a leading `-` negates.
+# Filters: f:<path regex>  -f:testData  sym:<symbol name>  lang:kotlin  case:yes|no  content:"two words"
+# Examples: zk ToolWindowSetInitializer            zk 'sym:ToolWindowSetInitializer'
+#           zk 'f:^community/platform/ lang:kotlin "fun doWhenFirstShown"'   zk -l 'HIDE_OTHER_EDITORS -f:test'
+set -uo pipefail
+self="$0"; [ -L "$self" ] && self="$(readlink "$self")"
+. "$(dirname "$self")/zk-config"
+INDEX_DIR="$ZOEKT_INDEX_DIR"; ZOEKT="$ZOEKT_BIN"; RG="$RG_BIN"
+limit="$ZK_LIMIT"; files_only=0; all=0; overlay=1; verbose=0
+usage() { sed -n '2,15p' "$self" | sed 's/^# \{0,1\}//'; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -l) files_only=1;; -n) limit="$2"; shift;; --all) all=1;; --no-overlay) overlay=0;; -v) verbose=1;;
+    -h|--help) usage; exit 0;; --) shift; break;; -*) echo "zk: unknown option $1" >&2; usage >&2; exit 2;; *) break;;
+  esac; shift
+done
+[ $# -gt 0 ] || { usage >&2; exit 2; }
+query="$*"
+log() { [ "$verbose" = 1 ] && echo "zk: $*" >&2; return 0; }
+[ -f "$INDEX_DIR/.commit" ] || { echo "zk: no index at $INDEX_DIR, run reindex.sh --full" >&2; exit 1; }
+sha="$(cat "$INDEX_DIR/.commit")"
+
+zq="$query"
+if [ -n "$ZK_EXCLUDE" ] && [ "$all" = 0 ]; then
+  key="${ZK_EXCLUDE#^}"; key="${key%/}"
+  case "$query" in *"$key"*) ;; *) zq="$zq -f:$ZK_EXCLUDE";; esac
+fi
+
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+changed="$tmp/changed"; : >"$changed"
+top=""; wtpid=""
+if [ "$overlay" = 1 ]; then
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || { overlay=0; log "not inside a git clone, index only"; }
+fi
+if [ "$overlay" = 1 ]; then
+  # working-tree changes run in the background, in parallel with the index query (budget: ZK_WT_BUDGET)
+  zk-wt >"$tmp/wt" 2>"$tmp/wterr" &
+  wtpid=$!
+  if git cat-file -e "$sha^{commit}" 2>/dev/null; then base="$sha"
+  else base="$(git rev-parse -q --verify "origin/$ZOEKT_BRANCH")"; log "index commit ${sha:0:12} is not in this clone (no fetch yet), overlaying from origin/$ZOEKT_BRANCH; index may show newer upstream content"; fi
+  git diff --name-only --diff-filter=ACMRD "$base" HEAD 2>/dev/null >"$tmp/committed"
+fi
+
+# 1. index results (filtered below once the local change set is known)
+if [ -x "$ZK_SEARCH_BIN" ]; then
+  zargs=("$ZK_SEARCH_BIN" -index_dir "$INDEX_DIR" -max_files "$limit" -max_lines "${ZK_MAX_LINES_PER_FILE:-20}")
+else
+  zargs=("$ZOEKT" -index_dir "$INDEX_DIR")   # stock CLI: no result caps, slow on very common terms
+fi
+[ "$files_only" = 1 ] && zargs+=(-l)
+"${zargs[@]}" "$zq" >"$tmp/raw" 2>"$tmp/zerr"
+[ -s "$tmp/zerr" ] && sed 's/^/zk: /' "$tmp/zerr" >&2
+
+if [ "$overlay" = 1 ]; then
+  wait "$wtpid" 2>/dev/null; [ -s "$tmp/wterr" ] && cat "$tmp/wterr" >&2
+  sort -u "$tmp/committed" "$tmp/wt" >"$changed"
+  log "base ${base:0:12}, $(wc -l <"$changed" | tr -d ' ') locally differing paths"
+fi
+awk -F: -v f="$changed" 'BEGIN{while ((getline l < f) > 0) skip[l]=1} !($1 in skip)' "$tmp/raw" >"$tmp/out"
+
+# 2. overlay: ripgrep over the locally differing files with the content terms of the query
+if [ "$overlay" = 1 ] && [ -s "$changed" ]; then
+  casef="-S"; pats=(); inc=(); exc=()
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    case "$t" in
+      or|'('|')') ;;
+      case:yes) casef="-s";; case:no) casef="-i";;
+      f:*|file:*) inc+=("${t#*:}");; -f:*|-file:*) exc+=("${t#*:}");;
+      sym:*|content:*|c:*|regex:*) pats+=("${t#*:}");;
+      -*|*:*) ;;  # negations and other filters: not applied to the overlay
+      *) pats+=("$t");;
+    esac
+  done < <(printf '%s' "$query" | xargs -n1 printf '%s\n' 2>/dev/null)
+  if [ "${#pats[@]}" -gt 0 ]; then
+    files="$tmp/files"; cp "$changed" "$files"
+    for p in ${inc[@]+"${inc[@]}"}; do "$RG" -e "$p" "$files" >"$files.n" || :; mv "$files.n" "$files"; done
+    for p in ${exc[@]+"${exc[@]}"}; do "$RG" -v -e "$p" "$files" >"$files.n" || :; mv "$files.n" "$files"; done
+    (cd "$top" && while IFS= read -r f; do [ -f "$f" ] && printf '%s\0' "$f"; done <"$files" \
+      | xargs -0 "$RG" -n --no-heading --color never $casef -e "${pats[0]}" -- 2>/dev/null) >"$tmp/ov" || :
+    i=1; while [ "$i" -lt "${#pats[@]}" ]; do "$RG" $casef -e "${pats[$i]}" "$tmp/ov" >"$tmp/ov.n" || :; mv "$tmp/ov.n" "$tmp/ov"; i=$((i+1)); done
+    if [ "$files_only" = 1 ]; then cut -d: -f1 "$tmp/ov" | sort -u >>"$tmp/out"; else cat "$tmp/ov" >>"$tmp/out"; fi
+    log "overlay: ${pats[*]} over $(wc -l <"$files" | tr -d ' ') files, $(wc -l <"$tmp/ov" | tr -d ' ') hits"
+  fi
+fi
+
+total="$(wc -l <"$tmp/out" | tr -d ' ')"
+head -n "$limit" "$tmp/out"
+[ "$total" -gt "$limit" ] && echo "zk: $total lines, showing $limit; narrow the query (f:path, lang:, -f:test) or raise -n" >&2
+exit 0

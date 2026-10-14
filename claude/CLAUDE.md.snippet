@@ -1,0 +1,12 @@
+## Searching the monorepo without an IDE index
+
+In a checkout that is not open in an IDE, a repo-wide `rg` / `git grep` reads every file (tens of seconds
+on a million-file tree). Use the local Zoekt index instead:
+
+- `zk '<query>'` — text, regex and symbol search over the whole monorepo in well under a second.
+  Plain text is a substring, regex metacharacters make it a regex, terms are ANDed, `or` works,
+  filters: `f:<path regex>`, `-f:testData`, `sym:<Name>`, `lang:kotlin`, `case:yes`. `-l` prints file
+  names only, `-n 500` raises the output cap. Local commits and uncommitted edits of the current clone
+  are overlaid on top of the shared index automatically.
+- `zkf '<path regex>'` — find files by path.
+- `rg` / `git grep` only with a module path argument, never from the repo root.

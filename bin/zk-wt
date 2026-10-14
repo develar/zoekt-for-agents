@@ -1,0 +1,39 @@
+#!/bin/bash
+# zk-wt - print working-tree paths that differ from HEAD (modified, added, deleted, renamed, untracked).
+#
+# git status on a million-file tree is usually fast with fsmonitor but has multi-second outliers, so:
+#   - a result younger than ZK_WT_FRESH seconds (default 5) is served from the cache without running git;
+#   - otherwise git status runs with a budget of ZK_WT_BUDGET seconds (default 2); when it overruns, it is
+#     left running to refresh the cache for the next call and the previous cache (if any) is used now.
+# Cache: <git dir>/zk-wt.cache. Exit 3 when nothing could be served within the budget.
+set -u
+self="$0"; [ -L "$self" ] && self="$(readlink "$self")"
+. "$(dirname "$self")/zk-config" 2>/dev/null
+budget="${ZK_WT_BUDGET:-2}"; fresh="${ZK_WT_FRESH:-5}"
+gitdir="$(git rev-parse --git-dir 2>/dev/null)" || exit 1
+cache="$gitdir/zk-wt.cache"; lock="$gitdir/zk-wt.lock"
+now=$(date +%s)
+if [ -f "$cache" ] && [ $(( now - $(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache") )) -le "$fresh" ]; then
+  cat "$cache"; exit 0
+fi
+if mkdir "$lock" 2>/dev/null; then
+  # run git status detached from this process so it can outlive the budget and still refresh the cache
+  (
+    trap 'rmdir "$lock" 2>/dev/null' EXIT
+    git status --porcelain --untracked-files=all 2>/dev/null \
+      | awk '{sub(/^.. /,""); i=index($0," -> "); if (i) {print substr($0,1,i-1); print substr($0,i+4)} else print}' >"$cache.tmp" \
+      && mv -f "$cache.tmp" "$cache"
+  ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || :
+fi
+i=0; max=$(awk -v b="$budget" 'BEGIN{printf "%d", b*10}')
+while [ -d "$lock" ] && [ "$i" -lt "$max" ]; do sleep 0.1; i=$((i+1)); done
+if [ -d "$lock" ]; then
+  if [ -f "$cache" ]; then
+    echo "zk: git status is slow right now, using working-tree changes from $(( now - $(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache") ))s ago" >&2
+    cat "$cache"; exit 0
+  fi
+  echo "zk: git status took longer than ${budget}s and no cached result exists yet, uncommitted changes are not overlaid this time" >&2
+  exit 3
+fi
+cat "$cache" 2>/dev/null

@@ -1,0 +1,14 @@
+# Sourced by zk, zkf, zk-wt and reindex.sh. Override any value in ~/.zoekt/config (KEY=VALUE lines).
+ZOEKT_REF_CLONE="${ZOEKT_REF_CLONE:-}"            # clone whose remote branch is indexed (required for reindex)
+ZOEKT_INDEX_DIR="${ZOEKT_INDEX_DIR:-$HOME/.zoekt/index}"
+ZOEKT_BRANCH="${ZOEKT_BRANCH:-master}"            # remote branch to index: refs/remotes/origin/<branch>
+ZOEKT_PARALLELISM="${ZOEKT_PARALLELISM:-8}"
+ZK_ROOT_MARKER="${ZK_ROOT_MARKER:-}"              # file present at the root of every clone of the indexed repo
+ZK_EXCLUDE="${ZK_EXCLUDE:-}"                      # f: regex excluded from zk results unless --all or mentioned in the query
+ZK_WT_BUDGET="${ZK_WT_BUDGET:-2}"                 # seconds given to git status for the working-tree overlay
+ZK_LIMIT="${ZK_LIMIT:-200}"                       # default output cap in lines
+[ -f "$HOME/.zoekt/config" ] && . "$HOME/.zoekt/config"
+export PATH="$HOME/.local/bin:$HOME/go/bin:/opt/homebrew/bin:$PATH"
+ZK_SEARCH_BIN="${ZK_SEARCH_BIN:-$(command -v zk-search || echo "$HOME/go/bin/zk-search")}"   # result-capped client (cmd/zk-search)
+ZOEKT_BIN="${ZOEKT_BIN:-$(command -v zoekt || echo "$HOME/go/bin/zoekt")}"                # fallback: stock zoekt CLI, no caps
+RG_BIN="${RG_BIN:-$(command -v rg || echo /opt/homebrew/bin/rg)}"

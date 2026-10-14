@@ -1,0 +1,17 @@
+#!/bin/bash
+# zkf - find files by path regex in the current clone (tracked + untracked), about a second on 1.4M files.
+# Usage: zkf [-n N] <path regex>        e.g. zkf 'ToolWindowSetInitializer\.kt$'   zkf 'platform/.*/plugin\.xml$'
+set -uo pipefail
+self="$0"; [ -L "$self" ] && self="$(readlink "$self")"
+. "$(dirname "$self")/zk-config"
+RG="$RG_BIN"; limit="$ZK_LIMIT"
+[ "${1:-}" = "-n" ] && { limit="$2"; shift 2; }
+[ $# -gt 0 ] || { sed -n '2,3p' "$self" | sed 's/^# //' >&2; exit 2; }
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "zkf: not inside a git clone" >&2; exit 1; }
+cd "$top" || exit 1
+tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+{ git ls-files; zk-wt; } | "$RG" -S -e "$*" >"$tmp" || :
+total="$(wc -l <"$tmp" | tr -d ' ')"
+head -n "$limit" "$tmp"
+[ "$total" -gt "$limit" ] && echo "zkf: $total matches, showing $limit; narrow the regex or raise -n" >&2
+exit 0

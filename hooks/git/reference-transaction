@@ -1,0 +1,12 @@
+#!/bin/bash
+# Local git hook for the reference clone: when origin/<branch> moves (fetch/pull), refresh the shared
+# Zoekt index in the background. reindex.sh exits at once if the index already matches.
+[ "${1:-}" = "committed" ] || exit 0
+branch="${ZOEKT_BRANCH:-master}"; [ -f "$HOME/.zoekt/config" ] && . "$HOME/.zoekt/config"
+while read -r _old _new ref; do
+  if [ "$ref" = "refs/remotes/origin/${ZOEKT_BRANCH:-$branch}" ]; then
+    nohup "$HOME/.zoekt/reindex.sh" >/dev/null 2>&1 &
+    break
+  fi
+done
+exit 0
