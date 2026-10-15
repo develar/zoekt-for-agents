@@ -27,10 +27,10 @@ queries well under a second.
 | `bin/zkf` | find files by path regex: `git ls-files` plus untracked files, through ripgrep |
 | `bin/zk-wt` | helper: working-tree changes with a cache and a time budget, so a slow `git status` never stalls a search |
 | `reindex.sh` | build or refresh the index from the reference clone's `origin/<branch>`; incremental/delta |
-| `hooks/git/reference-transaction` | local git hook for the reference clone: `origin/<branch>` moved, refresh in background |
+| `hooks/git/reference-transaction` | opt-in git hook for the reference clone on a system without launchd: `origin/<branch>` moved, refresh in background |
 | `hooks/claude/no-repo-wide-grep.py` | Claude Code `PreToolUse` hook: refuses repo-wide `rg` / `git grep` / `fd` inside a clone of the indexed repo and tells the agent to use `zk` |
 | `claude/` | `settings.json` and `CLAUDE.md` snippets |
-| `launchd/` | hourly reindex LaunchAgent template (macOS) |
+| `launchd/` | reindex LaunchAgent template (macOS): a ref change of origin, and hourly |
 | `install.sh` | symlinks, config, hook, launchd, Claude settings |
 
 ## Install
@@ -88,9 +88,14 @@ plain text is a substring, regex metacharacters make it a regex, terms are ANDed
 
 ## Keeping the index fresh
 
-- `hooks/git/reference-transaction`, linked into the reference clone, starts `reindex.sh` in the background
-  whenever `origin/<branch>` moves. `reindex.sh` exits at once if the index already matches.
-- The LaunchAgent runs `reindex.sh` hourly as a safety net.
+- The LaunchAgent (`--launchd`) watches the refs of the reference clone: `refs/remotes/origin/` and
+  `packed-refs`, or `reftable/` in a reftable repository. A fetch that moves a ref of origin starts
+  `reindex.sh`. `reindex.sh` exits at once if the index already matches. The LaunchAgent also runs it hourly as
+  a safety net.
+- Without launchd, `--git-hook` links `hooks/git/reference-transaction` into the reference clone. It starts
+  `reindex.sh` in the background whenever `origin/<branch>` moves. Git runs this hook in every worktree of the
+  clone. [Treehouse](https://github.com/kunchenguid/treehouse) then skips APFS sharing for a new pooled worktree,
+  because the hook could write into it during the checkout. On macOS, use the LaunchAgent instead.
 - Refreshes are delta builds (`zoekt-git-index -delta`); after 20 deltas a full rebuild happens automatically.
   Force one with `~/.zoekt/reindex.sh --full`.
 

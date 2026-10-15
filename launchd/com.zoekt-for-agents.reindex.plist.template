@@ -5,6 +5,8 @@
   <key>Label</key><string>com.zoekt-for-agents.reindex</string>
   <key>ProgramArguments</key>
   <array><string>@HOME@/.zoekt/reindex.sh</string></array>
+  <key>WatchPaths</key>
+  <array>@WATCH_PATHS@</array>
   <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><false/>
   <key>Nice</key><integer>10</integer>
